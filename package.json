@@ -1,14 +1,16 @@
 {
   "name": "openclaw-autoproxy",
-  "version": "1.0.0",
+  "version": "1.0.3",
   "description": "Local model-switching proxy gateway with OpenAI-compatible APIs",
   "type": "module",
-  "main": "src/gateway/server.ts",
+  "main": "dist/gateway/server.js",
   "bin": {
     "openclaw-autoproxy": "bin/openclaw-autoproxy.js"
   },
   "scripts": {
     "cli": "node bin/openclaw-autoproxy.js",
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
     "start": "node bin/openclaw-autoproxy.js gateway start",
     "dev": "node bin/openclaw-autoproxy.js gateway dev",
     "typecheck": "tsc --noEmit",

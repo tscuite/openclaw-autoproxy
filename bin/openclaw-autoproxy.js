@@ -3,6 +3,7 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -11,9 +12,24 @@ const args = process.argv.slice(2);
 
 const currentFilePath = fileURLToPath(import.meta.url);
 const packageRoot = path.resolve(path.dirname(currentFilePath), "..");
-const serverEntryPath = path.join(packageRoot, "src", "gateway", "server.ts");
-const tsxCliPath = path.join(packageRoot, "node_modules", "tsx", "dist", "cli.mjs");
+const serverSourceEntryPath = path.join(packageRoot, "src", "gateway", "server.ts");
+const serverBuildEntryPath = path.join(packageRoot, "dist", "gateway", "server.js");
 const packageJsonPath = path.join(packageRoot, "package.json");
+const require = createRequire(import.meta.url);
+
+function resolveTsxCliPath() {
+  const localTsxCliPath = path.join(packageRoot, "node_modules", "tsx", "dist", "cli.mjs");
+
+  if (existsSync(localTsxCliPath)) {
+    return localTsxCliPath;
+  }
+
+  try {
+    return require.resolve("tsx/dist/cli.mjs");
+  } catch {
+    return null;
+  }
+}
 
 function printHelp() {
   console.log(`openclaw-autoproxy - OpenClaw Auto Gateway CLI
@@ -60,8 +76,12 @@ async function printVersion() {
 }
 
 function runTsxMode(tsxArgs) {
-  if (!existsSync(tsxCliPath)) {
-    console.error("Missing tsx runtime. Reinstall dependencies and try again.");
+  const tsxCliPath = resolveTsxCliPath();
+
+  if (!tsxCliPath || !existsSync(tsxCliPath)) {
+    console.error(
+      "Missing tsx runtime. Install tsx globally (npm i -g tsx) or run a build that generates dist files.",
+    );
     process.exit(1);
   }
 
@@ -81,12 +101,34 @@ function runTsxMode(tsxArgs) {
   });
 }
 
+function runNodeMode(nodeArgs) {
+  const child = spawn(process.execPath, nodeArgs, {
+    stdio: "inherit",
+    cwd: process.cwd(),
+    env: process.env,
+  });
+
+  child.on("exit", (code, signal) => {
+    if (signal) {
+      process.kill(process.pid, signal);
+      return;
+    }
+
+    process.exit(code ?? 0);
+  });
+}
+
 function runDevMode(extraArgs) {
-  runTsxMode(["watch", serverEntryPath, ...extraArgs]);
+  runTsxMode(["watch", serverSourceEntryPath, ...extraArgs]);
 }
 
 function runStartMode(extraArgs) {
-  runTsxMode([serverEntryPath, ...extraArgs]);
+  if (existsSync(serverBuildEntryPath)) {
+    runNodeMode([serverBuildEntryPath, ...extraArgs]);
+    return;
+  }
+
+  runTsxMode([serverSourceEntryPath, ...extraArgs]);
 }
 
 function isHelpFlag(value) {

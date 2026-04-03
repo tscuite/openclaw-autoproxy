@@ -3,6 +3,9 @@
 Local proxy gateway that forwards OpenAI-compatible APIs and automatically switches model IDs when upstream returns retryable status codes (for example 412).
 
 ## Features
+```
+npx openclaw-autoproxy@1.0.3 start
+```
 
 - OpenAI-compatible proxy endpoint: `/v1/*`
 - Automatic model fallback on retryable statuses for `model: auto` only (default: 412, 429, 500, 502, 503, 504)
