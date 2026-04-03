@@ -1,4 +1,4 @@
-# OAG (OpenClaw Auto Gateway)
+# openclaw-autoproxy (OpenClaw Auto Gateway)
 
 Local proxy gateway that forwards OpenAI-compatible APIs and automatically switches model IDs when upstream returns retryable status codes (for example 412).
 
@@ -51,31 +51,31 @@ npm start
 
 ## Global CLI Usage
 
-You can install this project globally and run it via `oag`:
+You can install this project globally and run it via `openclaw-autoproxy`:
 
 ```bash
 npm i -g .
-oag gateway start
+openclaw-autoproxy gateway start
 ```
 
 Watch mode:
 
 ```bash
-oag gateway dev
+openclaw-autoproxy gateway dev
 ```
 
 Show CLI help:
 
 ```bash
-oag gateway help
+openclaw-autoproxy gateway help
 ```
 
 Backward-compatible aliases are still supported:
 
 ```bash
-oag start
-oag dev
-oag help
+openclaw-autoproxy start
+openclaw-autoproxy dev
+openclaw-autoproxy help
 ```
 
 ## OpenAI-Compatible Calls For 3 Models
