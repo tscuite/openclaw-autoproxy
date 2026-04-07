@@ -1,63 +1,66 @@
 # openclaw-autoproxy
 
-OpenClaw 自动代理网关 — 在本地提供 OpenAI 兼容的代理，基于 `routes.yml` 配置上游路由并支持模型自动回退。
+OpenClaw Auto Proxy Gateway — a local OpenAI-compatible proxy that forwards `/v1/*` requests to configured upstreams and supports automatic model fallback based on `routes.yml`.
 
-## 快速开始
+## Quick start
 
-1. 全局安装（推荐）：
+1. Install globally (recommended):
 
 ```bash
 npm i -g openclaw-autoproxy@latest
 ```
 
-2. 当前目录编辑路由配置：
+2. Edit the route configuration in the project root:
 
 ```bash
 vim routes.yml
 ```
 
-3. 启动代理（已安装模式）：
+3. Start the gateway (installed mode):
 
 ```bash
 openclaw-autoproxy start
 ```
 
-或者不安装、直接使用 `npx`：
+Or run without installing (via `npx`):
 
 ```bash
 npx openclaw-autoproxy@1.0.3 start
 ```
 
-启动后，本地 OpenAI 兼容接口通常可通过 `http://127.0.0.1:8787/v1/*` 访问（端口可通过配置更改）。
+After starting, the local OpenAI-compatible endpoint is usually available at `http://127.0.0.1:8787/v1/*` (port is configurable).
 
-## 简要示例 `routes.yml`
+## Example `routes.yml`
 
 ```yaml
-## 全局默认配置（推荐使用 ai gateway 时使用）
-## 或者不在配置文件设置 token，使用时通过 curl 携带
+# Optional global defaults
 defaults:
   authHeader: cf-aig-authorization
   authPrefix: "Bearer "
   apiKey: xxxxxxxxxxxxxxxxxx
+
 retryStatusCodes: [412, 429, 500, 502, 503, 504]
 
 routes:
-  - name: local-3000
-    url: http://localhost:3000
+  - name: openai
+    url: http://api.openai.com
     model: gpt-4.1
-    ## 路由级别 token配置（优先级高于全局）
+    # Route-level token (overrides defaults)
     apiKeyEnv: UPSTREAM_API_KEY
 
-  - name: local-4000
-    url: http://localhost:4000
+  - name: azure
+    url: http://azure-openai-endpoint
     model: gpt-3.5-turbo
-    ## 路由级别 token配置（优先级高于全局）
     apiKeyEnv: UPSTREAM_API_KEY
 ```
 
-## 常用命令（示例）
+## Common commands
 
-安装并启动：
+- Start: `openclaw-autoproxy start`
+- Dev (watch): `openclaw-autoproxy dev`
+- Help: `openclaw-autoproxy help`
+
+Quick run (installed):
 
 ```bash
 npm i -g openclaw-autoproxy@latest
@@ -65,15 +68,19 @@ vim routes.yml
 openclaw-autoproxy start
 ```
 
-直接运行（推荐 win 使用 npx）：
+Quick run (npx):
 
 ```bash
 npx openclaw-autoproxy@1.0.3 start
 ```
 
-## 说明
+## Notes
 
-- `routes.yml`：项目根目录下的上游路由与认证配置。
-- `UPSTREAM_API_KEY`：可通过环境变量提供上游认证密钥；也可在 `routes.yml` 中使用 `apiKey` 明文（不推荐）。
+- `routes.yml` is loaded from the project root.
+- Prefer `UPSTREAM_API_KEY` as an environment variable for upstream authentication. Route-level `apiKey` is supported but not recommended for production.
+- If the client request includes an `Authorization` header, the gateway forwards it; otherwise the gateway uses route-level or global credentials.
+- Streaming responses are forwarded as streams when an attempt succeeds.
+- When automatic model fallback occurs, the gateway may append a `gateway_notice` in JSON responses or emit a `gateway_notice` SSE event.
 
-更多高级配置与实现细节请查看 `src/gateway` 目录。
+See the implementation and more configuration options under `src/gateway`.
+
