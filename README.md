@@ -1,4 +1,6 @@
-# openclaw-autoproxy
+# Documentation: [English](README.md) · [简体中文](README.zh-CN.md)
+
+# Make Large Model APIs Always Available in OpenClaw
 
 OpenClaw Auto Proxy Gateway — a local OpenAI-compatible proxy that forwards `/v1/*` requests to configured upstreams and supports automatic model fallback based on `routes.yml`.
 
@@ -25,7 +27,7 @@ openclaw-autoproxy start
 Or run without installing (via `npx`):
 
 ```bash
-npx openclaw-autoproxy@1.0.3 start
+npx openclaw-autoproxy@latest start
 ```
 
 After starting, the local OpenAI-compatible endpoint is usually available at `http://127.0.0.1:8787/v1/*` (port is configurable).
@@ -71,8 +73,30 @@ openclaw-autoproxy start
 Quick run (npx):
 
 ```bash
-npx openclaw-autoproxy@1.0.3 start
+npx openclaw-autoproxy@latest start
 ```
+
+## Usage example
+
+Call the gateway locally:
+
+```bash
+curl -X POST http://127.0.0.1:8787/v1/chat/completions \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "model": "auto",
+    "messages": [
+      {
+        "role": "user",
+        "content": "what model are you"
+      }
+    ]
+  }'
+```
+
+Notes:
+- Using `"model": "auto"` causes the gateway to automatically rotate and fallback between candidate models configured in `routes.yml` when upstream returns retryable errors.
+- To pin a specific model, replace `"auto"` with the desired model name (for example, `"gpt-4.1"`).
 
 ## Notes
 
