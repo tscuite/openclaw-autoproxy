@@ -1,6 +1,6 @@
 {
   "name": "openclaw-autoproxy",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Local model-switching proxy gateway with OpenAI-compatible APIs",
   "type": "module",
   "main": "dist/gateway/server.js",
