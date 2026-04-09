@@ -1,5 +1,8 @@
 import { PassThrough, Readable } from "node:stream";
+import { Agent } from "undici";
+import { createAnthropicMessagesEventStreamTransformer, maybeTransformAnthropicMessagesRequest, transformOpenAiChatCompletionToAnthropicMessage, transformUpstreamErrorToAnthropicError, } from "./anthropic-compat.js";
 import { config } from "./config.js";
+import { recordModelLoadSample } from "./model-load-metrics.js";
 const HOP_BY_HOP_HEADERS = new Set([
     "connection",
     "keep-alive",
@@ -13,8 +16,37 @@ const HOP_BY_HOP_HEADERS = new Set([
 const MAX_REQUEST_BODY_BYTES = 50 * 1024 * 1024;
 const AUTO_MODEL = "auto";
 let autoModelCursor = 0;
+const upstreamAgent = new Agent({
+    connections: config.upstreamMaxConnections,
+    pipelining: 1,
+    keepAliveTimeout: config.upstreamKeepAliveTimeoutMs,
+    keepAliveMaxTimeout: config.upstreamKeepAliveMaxTimeoutMs,
+});
+const fetchWithDispatcher = fetch;
+function formatGatewayLogValue(value) {
+    if (value === null || value === undefined || value === "") {
+        return "-";
+    }
+    const normalized = String(value);
+    return /\s|"/.test(normalized) ? JSON.stringify(normalized) : normalized;
+}
+function buildGatewayLogLine(protocol, event, fields) {
+    const parts = [
+        "[gateway]",
+        `protocol=${formatGatewayLogValue(protocol)}`,
+        `event=${formatGatewayLogValue(event)}`,
+    ];
+    for (const [key, value] of Object.entries(fields)) {
+        parts.push(`${key}=${formatGatewayLogValue(value)}`);
+    }
+    return parts.join(" ");
+}
 function logProxyModelRoute(params) {
-    console.log(`[gateway] requested_model=${params.requestedModel ?? "-"} used_model=${params.usedModel ?? "-"} route=${params.routeName ?? "-"}`);
+    console.log(buildGatewayLogLine(params.protocol, "routed", {
+        requested_model: params.requestedModel,
+        used_model: params.usedModel,
+        route: params.routeName,
+    }));
 }
 function resolveRouteNameForModel(modelId) {
     if (modelId && config.modelRouteMap[modelId]) {
@@ -23,7 +55,27 @@ function resolveRouteNameForModel(modelId) {
     return config.modelRouteMap["*"]?.routeName ?? null;
 }
 function logProxyModelSwitch(params) {
-    console.log(`[gateway] switch trigger_status=${params.triggerStatus} from_model=${params.fromModel ?? "-"} from_route=${params.fromRoute ?? "-"} to_model=${params.toModel ?? "-"} to_route=${params.toRoute ?? "-"}`);
+    console.log(buildGatewayLogLine(params.protocol, "switch", {
+        trigger_status: params.triggerStatus,
+        from_model: params.fromModel,
+        from_route: params.fromRoute,
+        to_model: params.toModel,
+        to_route: params.toRoute,
+    }));
+}
+function resolveGatewayProtocolFromPath(requestPath) {
+    const { pathname } = parsePathnameAndSearch(requestPath);
+    if (pathname === "/anthropic" ||
+        pathname.startsWith("/anthropic/") ||
+        isAnthropicApiPath(pathname)) {
+        return "anthropic";
+    }
+    return "openai";
+}
+function resolveGatewayProtocol(request) {
+    const rawUrl = request.url ?? "/";
+    const normalizedRawUrl = rawUrl.startsWith("/") ? rawUrl : `/${rawUrl}`;
+    return resolveGatewayProtocolFromPath(normalizedRawUrl);
 }
 function sendJson(response, statusCode, payload) {
     if (response.writableEnded) {
@@ -39,11 +91,25 @@ function normalizeRequestPath(request) {
     const rawUrl = request.url ?? "/";
     try {
         const parsed = new URL(rawUrl, "http://localhost");
-        return `${parsed.pathname}${parsed.search}`;
+        return normalizeGatewayRequestPath(`${parsed.pathname}${parsed.search}`);
     }
     catch {
-        return rawUrl.startsWith("/") ? rawUrl : `/${rawUrl}`;
+        const normalizedRawUrl = rawUrl.startsWith("/") ? rawUrl : `/${rawUrl}`;
+        return normalizeGatewayRequestPath(normalizedRawUrl);
     }
+}
+function normalizeGatewayRequestPath(requestPath) {
+    const { pathname, search } = parsePathnameAndSearch(requestPath);
+    if (pathname === "/anthropic") {
+        return `/v1${search}`;
+    }
+    if (pathname === "/anthropic/v1" || pathname.startsWith("/anthropic/v1/")) {
+        return `${pathname.slice("/anthropic".length)}${search}`;
+    }
+    if (pathname.startsWith("/anthropic/")) {
+        return `/v1${pathname.slice("/anthropic".length)}${search}`;
+    }
+    return `${pathname}${search}`;
 }
 function rotateCandidates(candidates, startIndex) {
     if (candidates.length <= 1) {
@@ -71,31 +137,102 @@ function buildModelCandidates(requestedModel) {
     // Non-auto requests are pinned to the exact model specified by client.
     return [requestedModel];
 }
-function buildRoutedUpstreamUrl(request, selectedRoute) {
+function parsePathnameAndSearch(requestPath) {
+    try {
+        const parsed = new URL(requestPath, "http://localhost");
+        return {
+            pathname: parsed.pathname,
+            search: parsed.search,
+        };
+    }
+    catch {
+        const [pathnamePart, ...searchParts] = requestPath.split("?");
+        return {
+            pathname: pathnamePart || "/",
+            search: searchParts.length > 0 ? `?${searchParts.join("?")}` : "",
+        };
+    }
+}
+function isAnthropicApiPath(pathname) {
+    return (pathname === "/v1/messages" ||
+        pathname.startsWith("/v1/messages/") ||
+        pathname === "/v1/models" ||
+        pathname === "/v1/complete");
+}
+function rewriteFixedChatCompletionsRouteUrlForAnthropic(routeUrl, requestPath) {
+    const { pathname: requestPathname, search: requestSearch } = parsePathnameAndSearch(requestPath);
+    if (!isAnthropicApiPath(requestPathname)) {
+        return null;
+    }
+    let parsedRouteUrl;
+    try {
+        parsedRouteUrl = new URL(routeUrl);
+    }
+    catch {
+        return null;
+    }
+    const normalizedRoutePath = parsedRouteUrl.pathname.replace(/\/+$/, "");
+    const fixedChatCompletionsSuffix = "/v1/chat/completions";
+    if (!normalizedRoutePath.endsWith(fixedChatCompletionsSuffix)) {
+        return null;
+    }
+    const routePrefixPath = normalizedRoutePath.slice(0, -fixedChatCompletionsSuffix.length);
+    parsedRouteUrl.pathname = `${routePrefixPath}${requestPathname}`.replace(/\/{2,}/g, "/");
+    parsedRouteUrl.search = requestSearch;
+    return parsedRouteUrl.toString();
+}
+function buildRoutedUpstreamUrl(requestPath, selectedRoute) {
     if (!selectedRoute) {
-        return `${config.upstreamBaseUrl}${normalizeRequestPath(request)}`;
+        return `${config.upstreamBaseUrl}${requestPath}`;
     }
     if (!selectedRoute.isBaseUrl) {
+        // Backward-compatible Anthropic support when route URL is fixed to /v1/chat/completions.
+        const anthropicCompatUrl = rewriteFixedChatCompletionsRouteUrlForAnthropic(selectedRoute.url, requestPath);
+        if (anthropicCompatUrl) {
+            return anthropicCompatUrl;
+        }
         return selectedRoute.url;
     }
     const routeBase = selectedRoute.url.replace(/\/+$/, "");
-    const requestPath = normalizeRequestPath(request);
     if (routeBase.endsWith("/v1") && requestPath.startsWith("/v1")) {
         return `${routeBase}${requestPath.slice(3)}`;
     }
     return `${routeBase}${requestPath}`;
 }
-function resolveUpstreamTarget(request, modelId) {
+function resolveUpstreamTarget(requestPath, modelId) {
     const modelRoute = modelId ? config.modelRouteMap[modelId] ?? null : null;
     const wildcardRoute = config.modelRouteMap["*"] ?? null;
     const selectedRoute = modelRoute ?? wildcardRoute;
     return {
-        upstreamUrl: buildRoutedUpstreamUrl(request, selectedRoute),
+        upstreamUrl: buildRoutedUpstreamUrl(requestPath, selectedRoute),
         selectedRoute,
     };
 }
+async function logUpstreamErrorResponse(params) {
+    let detail = "-";
+    try {
+        const raw = await params.response.clone().text();
+        const normalized = raw.replace(/\s+/g, " ").trim();
+        if (normalized) {
+            detail = normalized.slice(0, 2000);
+        }
+    }
+    catch {
+        detail = "<unavailable>";
+    }
+    console.error(buildGatewayLogLine(params.protocol, "upstream_error", {
+        status: params.response.status,
+        path: params.requestPath,
+        route: params.routeName,
+        model: params.modelId,
+        upstream: params.upstreamUrl,
+        detail,
+    }));
+}
 function buildUpstreamHeaders(reqHeaders, bodyLength, selectedRoute) {
     const headers = new Headers();
+    const selectedAuthHeader = selectedRoute?.authHeader || "authorization";
+    const conflictingAuthHeaders = ["authorization", "x-api-key", "api-key"];
     for (const [key, value] of Object.entries(reqHeaders)) {
         if (value === undefined) {
             continue;
@@ -106,13 +243,20 @@ function buildUpstreamHeaders(reqHeaders, bodyLength, selectedRoute) {
         }
         headers.set(key, Array.isArray(value) ? value.join(",") : String(value));
     }
+    if (selectedRoute?.apiKey) {
+        for (const headerName of conflictingAuthHeaders) {
+            if (headerName !== selectedAuthHeader) {
+                headers.delete(headerName);
+            }
+        }
+    }
     if (selectedRoute?.headers) {
         for (const [key, value] of Object.entries(selectedRoute.headers)) {
             headers.set(key, value);
         }
     }
     if (selectedRoute?.apiKey) {
-        const authHeader = selectedRoute.authHeader || "authorization";
+        const authHeader = selectedAuthHeader;
         const authPrefix = selectedRoute.authPrefix ?? "Bearer ";
         if (!headers.has(authHeader)) {
             headers.set(authHeader, `${authPrefix}${selectedRoute.apiKey}`);
@@ -224,10 +368,61 @@ async function fetchWithTimeout(url, options, timeoutMs) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     try {
-        return await fetch(url, { ...options, signal: controller.signal });
+        return await fetchWithDispatcher(url, {
+            ...options,
+            signal: controller.signal,
+            dispatcher: upstreamAgent,
+        });
     }
     finally {
         clearTimeout(timeoutId);
+    }
+}
+function createClientAbortSignal(request, response) {
+    const controller = new AbortController();
+    let aborted = false;
+    const abort = () => {
+        if (aborted) {
+            return;
+        }
+        aborted = true;
+        controller.abort();
+    };
+    request.once("aborted", abort);
+    response.once("close", () => {
+        if (!response.writableEnded) {
+            abort();
+        }
+    });
+    return controller.signal;
+}
+async function fetchWithTimeoutAndClientSignal(url, options, timeoutMs, clientSignal) {
+    if (!clientSignal) {
+        return fetchWithTimeout(url, options, timeoutMs);
+    }
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    const onClientAbort = () => {
+        if (!controller.signal.aborted) {
+            controller.abort();
+        }
+    };
+    if (clientSignal.aborted) {
+        onClientAbort();
+    }
+    else {
+        clientSignal.addEventListener("abort", onClientAbort, { once: true });
+    }
+    try {
+        return await fetchWithDispatcher(url, {
+            ...options,
+            signal: controller.signal,
+            dispatcher: upstreamAgent,
+        });
+    }
+    finally {
+        clearTimeout(timeoutId);
+        clientSignal.removeEventListener("abort", onClientAbort);
     }
 }
 async function disposeBody(response) {
@@ -295,6 +490,9 @@ async function readRequestBody(request) {
 export async function proxyRequest(request, response) {
     const method = (request.method ?? "GET").toUpperCase();
     const supportsBody = method !== "GET" && method !== "HEAD";
+    const clientSignal = createClientAbortSignal(request, response);
+    const normalizedRequestPath = normalizeRequestPath(request);
+    const requestProtocol = resolveGatewayProtocol(request);
     let incomingBody = Buffer.alloc(0);
     if (supportsBody) {
         try {
@@ -344,23 +542,62 @@ export async function proxyRequest(request, response) {
     let switchNotice = null;
     for (let attemptIndex = 0; attemptIndex < modelCandidates.length; attemptIndex += 1) {
         const modelId = modelCandidates[attemptIndex];
-        let bodyBuffer = supportsBody && incomingBody.length > 0 ? incomingBody : undefined;
-        if (supportsBody && parsedJsonBody && modelId) {
-            bodyBuffer = Buffer.from(JSON.stringify({
+        let requestPath = normalizedRequestPath;
+        let responseFormat = null;
+        let requestJsonPayload = null;
+        if (supportsBody && parsedJsonBody) {
+            requestJsonPayload = {
                 ...parsedJsonBody,
-                model: modelId,
-            }), "utf8");
+                ...(modelId ? { model: modelId } : {}),
+            };
         }
-        const { upstreamUrl, selectedRoute } = resolveUpstreamTarget(request, modelId);
+        let { upstreamUrl, selectedRoute } = resolveUpstreamTarget(requestPath, modelId);
         lastAttemptRouteName = selectedRoute?.routeName ?? null;
+        if (requestJsonPayload) {
+            const compatRequest = maybeTransformAnthropicMessagesRequest({
+                requestPath,
+                upstreamUrl,
+                body: requestJsonPayload,
+            });
+            if (compatRequest.error) {
+                console.error(buildGatewayLogLine(requestProtocol, "compat_error", {
+                    path: requestPath,
+                    route: selectedRoute?.routeName ?? null,
+                    model: modelId,
+                    detail: compatRequest.error,
+                }));
+                sendJson(response, 400, {
+                    error: {
+                        message: compatRequest.error,
+                    },
+                });
+                return;
+            }
+            requestPath = compatRequest.requestPath;
+            requestJsonPayload = compatRequest.body;
+            responseFormat = compatRequest.responseFormat;
+            if (responseFormat) {
+                upstreamUrl = buildRoutedUpstreamUrl(requestPath, selectedRoute);
+            }
+        }
+        let bodyBuffer = supportsBody && incomingBody.length > 0 ? incomingBody : undefined;
+        if (supportsBody && requestJsonPayload) {
+            bodyBuffer = Buffer.from(JSON.stringify(requestJsonPayload), "utf8");
+        }
         const requestBody = bodyBuffer ? new Uint8Array(bodyBuffer) : undefined;
         const headers = buildUpstreamHeaders(request.headers, bodyBuffer ? bodyBuffer.length : undefined, selectedRoute);
         try {
-            const upstreamResponse = await fetchWithTimeout(upstreamUrl, {
+            const attemptStartedAt = Date.now();
+            const upstreamResponse = await fetchWithTimeoutAndClientSignal(upstreamUrl, {
                 method,
                 headers,
                 body: requestBody,
-            }, config.timeoutMs);
+            }, config.timeoutMs, clientSignal);
+            const headerLoadMs = Date.now() - attemptStartedAt;
+            const modelForMetric = modelId ?? requestedModel;
+            if (upstreamResponse.ok) {
+                recordModelLoadSample(modelForMetric, headerLoadMs);
+            }
             const contentType = (upstreamResponse.headers.get("content-type") ?? "").toLowerCase();
             const isEventStream = contentType.includes("text/event-stream");
             const isJsonResponse = contentType.includes("application/json");
@@ -378,6 +615,7 @@ export async function proxyRequest(request, response) {
                 const triggerStatus = retryTriggerStatus ?? upstreamResponse.status;
                 const nextRouteName = resolveRouteNameForModel(nextModel);
                 logProxyModelSwitch({
+                    protocol: requestProtocol,
                     triggerStatus,
                     fromModel: modelId,
                     toModel: nextModel,
@@ -396,6 +634,16 @@ export async function proxyRequest(request, response) {
                 await disposeBody(upstreamResponse);
                 continue;
             }
+            if (!upstreamResponse.ok) {
+                await logUpstreamErrorResponse({
+                    protocol: requestProtocol,
+                    requestPath,
+                    upstreamUrl,
+                    routeName: selectedRoute?.routeName ?? null,
+                    modelId,
+                    response: upstreamResponse,
+                });
+            }
             const attemptCount = attemptIndex + 1;
             const effectiveSwitchNotice = switchNotice;
             copyResponseHeaders(upstreamResponse, response);
@@ -407,6 +655,7 @@ export async function proxyRequest(request, response) {
                 response.setHeader("x-gateway-switched", "1");
             }
             logProxyModelRoute({
+                protocol: requestProtocol,
                 requestedModel,
                 usedModel: modelId,
                 routeName: selectedRoute?.routeName ?? null,
@@ -415,6 +664,61 @@ export async function proxyRequest(request, response) {
             if (!upstreamResponse.body) {
                 response.end();
                 return;
+            }
+            if (responseFormat === "anthropic-messages" && isEventStream) {
+                const nodeStream = Readable.fromWeb(upstreamResponse.body);
+                const anthropicStream = nodeStream.pipe(createAnthropicMessagesEventStreamTransformer(modelId));
+                response.removeHeader("content-length");
+                response.setHeader("content-type", "text/event-stream; charset=utf-8");
+                if (effectiveSwitchNotice) {
+                    createSsePrefixedStream(anthropicStream, effectiveSwitchNotice).pipe(response);
+                    return;
+                }
+                anthropicStream.on("error", () => {
+                    if (!response.writableEnded) {
+                        response.destroy();
+                    }
+                });
+                anthropicStream.pipe(response);
+                return;
+            }
+            if (responseFormat === "anthropic-messages" && isJsonResponse && !isEventStream) {
+                const rawText = await upstreamResponse.text();
+                response.removeHeader("content-length");
+                response.setHeader("content-type", "application/json; charset=utf-8");
+                try {
+                    const parsed = JSON.parse(rawText);
+                    if (!upstreamResponse.ok) {
+                        response.end(JSON.stringify(transformUpstreamErrorToAnthropicError(parsed, upstreamResponse.status)));
+                        return;
+                    }
+                    const transformed = transformOpenAiChatCompletionToAnthropicMessage(parsed, modelId);
+                    if (transformed.value) {
+                        response.end(JSON.stringify(transformed.value));
+                        return;
+                    }
+                    console.error(buildGatewayLogLine(requestProtocol, "compat_error", {
+                        path: requestPath,
+                        route: selectedRoute?.routeName ?? null,
+                        model: modelId,
+                        detail: transformed.error ?? "Unknown transform error",
+                    }));
+                    sendJson(response, 502, {
+                        error: {
+                            message: "Gateway failed to translate the OpenAI-compatible response to Anthropic format.",
+                            detail: transformed.error ?? "Unknown transform error",
+                        },
+                    });
+                    return;
+                }
+                catch {
+                    if (!upstreamResponse.ok) {
+                        response.end(JSON.stringify(transformUpstreamErrorToAnthropicError({
+                            message: rawText,
+                        }, upstreamResponse.status)));
+                        return;
+                    }
+                }
             }
             if (effectiveSwitchNotice && isJsonResponse && !isEventStream) {
                 const rawText = await upstreamResponse.text();
@@ -461,6 +765,7 @@ export async function proxyRequest(request, response) {
     const errorStatusCode = timeoutLike ? 504 : 502;
     const lastTriedModel = modelCandidates[modelCandidates.length - 1] ?? null;
     logProxyModelRoute({
+        protocol: requestProtocol,
         requestedModel,
         usedModel: lastTriedModel,
         routeName: lastAttemptRouteName,

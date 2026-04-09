@@ -2,7 +2,7 @@
 
 # Make Large Model APIs Always Available in OpenClaw
 
-OpenClaw Auto Proxy Gateway — a local OpenAI-compatible proxy that forwards `/v1/*` requests to configured upstreams and supports automatic model fallback based on `routes.yml`.
+OpenClaw Auto Proxy Gateway — a local proxy that exposes OpenAI-compatible `/v1/*` and Anthropic-compatible `/anthropic/*` endpoints, forwarding requests to configured upstreams and supporting automatic model fallback based on `routes.yml`.
 
 ## Quick start
 
@@ -30,7 +30,7 @@ Or run without installing (via `npx`):
 npx openclaw-autoproxy@latest start
 ```
 
-After starting, the local OpenAI-compatible endpoint is usually available at `http://127.0.0.1:8787/v1/*` (port is configurable).
+After starting, the local OpenAI-compatible endpoint is usually available at `http://127.0.0.1:8787/v1/*`, and the local Anthropic-compatible endpoint at `http://127.0.0.1:8787/anthropic/*` (port is configurable).
 
 ## Example `routes.yml`
 
@@ -98,11 +98,18 @@ Notes:
 - Using `"model": "auto"` causes the gateway to automatically rotate and fallback between candidate models configured in `routes.yml` when upstream returns retryable errors.
 - To pin a specific model, replace `"auto"` with the desired model name (for example, `"gpt-4.1"`).
 
+## Anthropic Compatibility
+
+- The local `/anthropic/v1/messages` endpoint can translate Anthropic Messages API requests into OpenAI-compatible `chat/completions` requests when the selected upstream route is OpenAI-style rather than native Anthropic.
+- This translation covers both non-streaming and streaming text/tool-call responses for OpenAI-style upstream routes.
+- When an upstream returns `4xx` or `5xx`, the gateway now logs a compact `[gateway] upstream_error ...` line with the selected route, model, upstream URL, and a response body snippet.
+
+
 ## Notes
 
 - `routes.yml` is loaded from the project root.
 - Prefer `UPSTREAM_API_KEY` as an environment variable for upstream authentication. Route-level `apiKey` is supported but not recommended for production.
-- If the client request includes an `Authorization` header, the gateway forwards it; otherwise the gateway uses route-level or global credentials.
+- If a route authenticates with the standard `Authorization` header, the client `Authorization` header is forwarded unless route credentials override it. If a route authenticates with a different header such as `cf-aig-authorization`, the gateway strips conflicting client auth headers such as `Authorization` and `x-api-key` to avoid leaking dummy or incompatible provider tokens upstream.
 - Streaming responses are forwarded as streams when an attempt succeeds.
 - When automatic model fallback occurs, the gateway may append a `gateway_notice` in JSON responses or emit a `gateway_notice` SSE event.
 

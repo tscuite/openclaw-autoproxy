@@ -12,6 +12,16 @@ function parseCsvList(value) {
         .map((item) => item.trim())
         .filter(Boolean);
 }
+function parsePositiveInteger(value, fallback) {
+    if (!value) {
+        return fallback;
+    }
+    const parsed = Number.parseInt(value, 10);
+    if (!Number.isInteger(parsed) || parsed <= 0) {
+        return fallback;
+    }
+    return parsed;
+}
 function parseRetryCodes(value) {
     const defaults = new Set([412, 429, 500, 502, 503, 504]);
     if (!value) {
@@ -248,6 +258,9 @@ function loadRouteFileConfig() {
 const host = process.env.HOST ?? "0.0.0.0";
 const port = Number.parseInt(process.env.PORT ?? "8787", 10);
 const timeoutMs = Number.parseInt(process.env.REQUEST_TIMEOUT_MS ?? "60000", 10);
+const upstreamMaxConnections = parsePositiveInteger(process.env.UPSTREAM_MAX_CONNECTIONS, 200);
+const upstreamKeepAliveTimeoutMs = parsePositiveInteger(process.env.UPSTREAM_KEEPALIVE_TIMEOUT_MS, 60_000);
+const upstreamKeepAliveMaxTimeoutMs = parsePositiveInteger(process.env.UPSTREAM_KEEPALIVE_MAX_TIMEOUT_MS, 300_000);
 const upstreamBaseUrl = (process.env.UPSTREAM_BASE_URL ?? "https://api.openai.com").replace(/\/+$/, "");
 const routeFileConfig = loadRouteFileConfig();
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -262,6 +275,9 @@ export const config = {
     timeoutMs,
     upstreamBaseUrl,
     upstreamApiKey: process.env.UPSTREAM_API_KEY ?? "",
+    upstreamMaxConnections,
+    upstreamKeepAliveTimeoutMs,
+    upstreamKeepAliveMaxTimeoutMs,
     retryStatusCodes: routeFileConfig.retryStatusCodes ?? parseRetryCodes(process.env.RETRY_STATUS_CODES),
     globalFallbackModels: parseCsvList(process.env.GLOBAL_FALLBACK_MODELS),
     modelFallbackMap: parseModelFallbackMap(process.env.MODEL_FALLBACK_MAP),

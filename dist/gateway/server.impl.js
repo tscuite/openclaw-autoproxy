@@ -21,7 +21,7 @@ export async function startGatewayServer(port = config.port, opts = {}) {
     });
     const address = server.address();
     const resolvedPort = typeof address === "object" && address ? address.port : port;
-    console.log(`Gateway listening on http://${host}:${resolvedPort} -> ${config.upstreamBaseUrl}`);
+    console.log(`Gateway listening on http://${host}:${resolvedPort}`);
     return {
         close: async () => {
             await new Promise((resolve, reject) => {
