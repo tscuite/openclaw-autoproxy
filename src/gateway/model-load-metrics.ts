@@ -1,39 +1,33 @@
 const DEFAULT_WINDOW_MS = 12 * 60 * 60 * 1000;
 const DEFAULT_MAX_SAMPLES_PER_MODEL = 5000;
 
-interface ModelLoadSample {
+export const DEFAULT_MODEL_HEALTH_WINDOW_MS = DEFAULT_WINDOW_MS;
+
+interface ModelRequestSample {
   at: number;
-  loadMs: number;
+  ok: boolean;
+  responseMs: number;
+  statusCode: number | null;
 }
 
-interface ModelLoadSummary {
+export interface ModelHealthSummary {
   model: string;
-  sampleCount: number;
-  avgLoadMs: number;
-  p50LoadMs: number;
-  p95LoadMs: number;
-  minLoadMs: number;
-  maxLoadMs: number;
+  accessCount: number;
+  avgResponseMs: number;
+  lastResponseMs: number;
   lastSeenAt: string;
+  lastStatusCode: number | null;
+  successCount: number;
+  successRatePct: number;
 }
 
-const modelSamples = new Map<string, ModelLoadSample[]>();
-
-function quantileFromSorted(values: number[], q: number): number {
-  if (values.length === 0) {
-    return 0;
-  }
-
-  const clampedQ = Math.max(0, Math.min(1, q));
-  const index = Math.floor((values.length - 1) * clampedQ);
-  return values[index] ?? values[values.length - 1] ?? 0;
-}
+const modelSamples = new Map<string, ModelRequestSample[]>();
 
 function roundMs(value: number): number {
   return Math.round(value * 100) / 100;
 }
 
-function pruneModelSamples(samples: ModelLoadSample[], cutoffAt: number): ModelLoadSample[] {
+function pruneModelSamples(samples: ModelRequestSample[], cutoffAt: number): ModelRequestSample[] {
   let startIndex = 0;
 
   while (startIndex < samples.length && samples[startIndex] && samples[startIndex].at < cutoffAt) {
@@ -62,19 +56,28 @@ function pruneExpiredSamples(cutoffAt: number): void {
   }
 }
 
-export function recordModelLoadSample(model: string | null, loadMs: number): void {
+export function recordModelRequestSample(
+  model: string | null,
+  params: {
+    ok: boolean;
+    responseMs: number;
+    statusCode?: number | null;
+  },
+): void {
   if (!model) {
     return;
   }
 
-  if (!Number.isFinite(loadMs) || loadMs <= 0) {
+  if (!Number.isFinite(params.responseMs) || params.responseMs < 0) {
     return;
   }
 
   const now = Date.now();
-  const sample: ModelLoadSample = {
+  const sample: ModelRequestSample = {
     at: now,
-    loadMs,
+    ok: params.ok,
+    responseMs: params.responseMs,
+    statusCode: params.statusCode ?? null,
   };
 
   const existing = modelSamples.get(model) ?? [];
@@ -90,41 +93,48 @@ export function recordModelLoadSample(model: string | null, loadMs: number): voi
   pruneExpiredSamples(cutoffAt);
 }
 
-function summarizeModel(model: string, samples: ModelLoadSample[]): ModelLoadSummary | null {
+export function recordModelLoadSample(model: string | null, loadMs: number): void {
+  recordModelRequestSample(model, {
+    ok: true,
+    responseMs: loadMs,
+    statusCode: 200,
+  });
+}
+
+function summarizeModel(model: string, samples: ModelRequestSample[]): ModelHealthSummary | null {
   if (samples.length === 0) {
     return null;
   }
 
-  const loadValues = samples.map((sample) => sample.loadMs).sort((a, b) => a - b);
-  const total = loadValues.reduce((acc, value) => acc + value, 0);
-  const avgLoadMs = total / loadValues.length;
-  const minLoadMs = loadValues[0] ?? 0;
-  const maxLoadMs = loadValues[loadValues.length - 1] ?? 0;
-  const latestAt = samples[samples.length - 1]?.at ?? Date.now();
+  const accessCount = samples.length;
+  const successCount = samples.reduce((count, sample) => count + (sample.ok ? 1 : 0), 0);
+  const totalResponseMs = samples.reduce((total, sample) => total + sample.responseMs, 0);
+  const lastSample = samples[samples.length - 1] ?? null;
+  const avgResponseMs = totalResponseMs / accessCount;
+  const successRatePct = accessCount > 0 ? (successCount / accessCount) * 100 : 0;
 
   return {
     model,
-    sampleCount: samples.length,
-    avgLoadMs: roundMs(avgLoadMs),
-    p50LoadMs: roundMs(quantileFromSorted(loadValues, 0.5)),
-    p95LoadMs: roundMs(quantileFromSorted(loadValues, 0.95)),
-    minLoadMs: roundMs(minLoadMs),
-    maxLoadMs: roundMs(maxLoadMs),
-    lastSeenAt: new Date(latestAt).toISOString(),
+    accessCount,
+    avgResponseMs: roundMs(avgResponseMs),
+    lastResponseMs: roundMs(lastSample?.responseMs ?? 0),
+    lastSeenAt: new Date(lastSample?.at ?? Date.now()).toISOString(),
+    lastStatusCode: lastSample?.statusCode ?? null,
+    successCount,
+    successRatePct: roundMs(successRatePct),
   };
 }
 
-export function getModelLoadRankingHealth(windowMs = DEFAULT_WINDOW_MS): {
+export function getModelHealthWindow(windowMs = DEFAULT_WINDOW_MS): {
   windowHours: number;
-  rankedModels: Array<ModelLoadSummary & { rank: number }>;
+  models: Array<ModelHealthSummary & { rank: number }>;
 } {
   const normalizedWindowMs = Number.isFinite(windowMs) && windowMs > 0 ? windowMs : DEFAULT_WINDOW_MS;
-  const now = Date.now();
-  const cutoffAt = now - normalizedWindowMs;
+  const cutoffAt = Date.now() - normalizedWindowMs;
 
   pruneExpiredSamples(cutoffAt);
 
-  const summaries: ModelLoadSummary[] = [];
+  const summaries: ModelHealthSummary[] = [];
 
   for (const [model, samples] of modelSamples.entries()) {
     const filtered = pruneModelSamples(samples, cutoffAt);
@@ -145,22 +155,38 @@ export function getModelLoadRankingHealth(windowMs = DEFAULT_WINDOW_MS): {
   }
 
   summaries.sort((a, b) => {
-    if (a.avgLoadMs !== b.avgLoadMs) {
-      return a.avgLoadMs - b.avgLoadMs;
+    if (a.accessCount !== b.accessCount) {
+      return b.accessCount - a.accessCount;
     }
 
-    if (a.p95LoadMs !== b.p95LoadMs) {
-      return a.p95LoadMs - b.p95LoadMs;
+    if (a.successRatePct !== b.successRatePct) {
+      return b.successRatePct - a.successRatePct;
     }
 
-    return b.sampleCount - a.sampleCount;
+    if (a.avgResponseMs !== b.avgResponseMs) {
+      return a.avgResponseMs - b.avgResponseMs;
+    }
+
+    return a.model.localeCompare(b.model);
   });
 
   return {
     windowHours: roundMs(normalizedWindowMs / (60 * 60 * 1000)),
-    rankedModels: summaries.map((entry, index) => ({
+    models: summaries.map((entry, index) => ({
       rank: index + 1,
       ...entry,
     })),
+  };
+}
+
+export function getModelLoadRankingHealth(windowMs = DEFAULT_WINDOW_MS): {
+  windowHours: number;
+  rankedModels: Array<ModelHealthSummary & { rank: number }>;
+} {
+  const health = getModelHealthWindow(windowMs);
+
+  return {
+    windowHours: health.windowHours,
+    rankedModels: health.models,
   };
 }

@@ -2,7 +2,7 @@ import { PassThrough, Readable } from "node:stream";
 import { Agent } from "undici";
 import { createAnthropicMessagesEventStreamTransformer, maybeTransformAnthropicMessagesRequest, transformOpenAiChatCompletionToAnthropicMessage, transformUpstreamErrorToAnthropicError, } from "./anthropic-compat.js";
 import { config } from "./config.js";
-import { recordModelLoadSample } from "./model-load-metrics.js";
+import { recordModelRequestSample } from "./model-load-metrics.js";
 const HOP_BY_HOP_HEADERS = new Set([
     "connection",
     "keep-alive",
@@ -586,8 +586,8 @@ export async function proxyRequest(request, response) {
         }
         const requestBody = bodyBuffer ? new Uint8Array(bodyBuffer) : undefined;
         const headers = buildUpstreamHeaders(request.headers, bodyBuffer ? bodyBuffer.length : undefined, selectedRoute);
+        const attemptStartedAt = Date.now();
         try {
-            const attemptStartedAt = Date.now();
             const upstreamResponse = await fetchWithTimeoutAndClientSignal(upstreamUrl, {
                 method,
                 headers,
@@ -595,9 +595,11 @@ export async function proxyRequest(request, response) {
             }, config.timeoutMs, clientSignal);
             const headerLoadMs = Date.now() - attemptStartedAt;
             const modelForMetric = modelId ?? requestedModel;
-            if (upstreamResponse.ok) {
-                recordModelLoadSample(modelForMetric, headerLoadMs);
-            }
+            recordModelRequestSample(modelForMetric, {
+                ok: upstreamResponse.ok,
+                responseMs: headerLoadMs,
+                statusCode: upstreamResponse.status,
+            });
             const contentType = (upstreamResponse.headers.get("content-type") ?? "").toLowerCase();
             const isEventStream = contentType.includes("text/event-stream");
             const isJsonResponse = contentType.includes("application/json");
@@ -753,6 +755,11 @@ export async function proxyRequest(request, response) {
         }
         catch (error) {
             lastError = error;
+            recordModelRequestSample(modelId ?? requestedModel, {
+                ok: false,
+                responseMs: Date.now() - attemptStartedAt,
+                statusCode: null,
+            });
             if (attemptIndex < modelCandidates.length - 1) {
                 continue;
             }

@@ -8,7 +8,7 @@ import {
   transformUpstreamErrorToAnthropicError,
 } from "./anthropic-compat.js";
 import { config, type ModelRouteConfig } from "./config.js";
-import { recordModelLoadSample } from "./model-load-metrics.js";
+import { recordModelRequestSample } from "./model-load-metrics.js";
 
 const HOP_BY_HOP_HEADERS = new Set([
   "connection",
@@ -814,8 +814,9 @@ export async function proxyRequest(request: IncomingMessage, response: ServerRes
       selectedRoute,
     );
 
+    const attemptStartedAt = Date.now();
+
     try {
-      const attemptStartedAt = Date.now();
       const upstreamResponse = await fetchWithTimeoutAndClientSignal(
         upstreamUrl,
         {
@@ -829,9 +830,11 @@ export async function proxyRequest(request: IncomingMessage, response: ServerRes
       const headerLoadMs = Date.now() - attemptStartedAt;
       const modelForMetric = modelId ?? requestedModel;
 
-      if (upstreamResponse.ok) {
-        recordModelLoadSample(modelForMetric, headerLoadMs);
-      }
+      recordModelRequestSample(modelForMetric, {
+        ok: upstreamResponse.ok,
+        responseMs: headerLoadMs,
+        statusCode: upstreamResponse.status,
+      });
 
       const contentType = (upstreamResponse.headers.get("content-type") ?? "").toLowerCase();
       const isEventStream = contentType.includes("text/event-stream");
@@ -1028,6 +1031,12 @@ export async function proxyRequest(request: IncomingMessage, response: ServerRes
       return;
     } catch (error) {
       lastError = error;
+
+      recordModelRequestSample(modelId ?? requestedModel, {
+        ok: false,
+        responseMs: Date.now() - attemptStartedAt,
+        statusCode: null,
+      });
 
       if (attemptIndex < modelCandidates.length - 1) {
         continue;

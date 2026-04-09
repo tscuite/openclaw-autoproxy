@@ -1,14 +1,7 @@
 const DEFAULT_WINDOW_MS = 12 * 60 * 60 * 1000;
 const DEFAULT_MAX_SAMPLES_PER_MODEL = 5000;
+export const DEFAULT_MODEL_HEALTH_WINDOW_MS = DEFAULT_WINDOW_MS;
 const modelSamples = new Map();
-function quantileFromSorted(values, q) {
-    if (values.length === 0) {
-        return 0;
-    }
-    const clampedQ = Math.max(0, Math.min(1, q));
-    const index = Math.floor((values.length - 1) * clampedQ);
-    return values[index] ?? values[values.length - 1] ?? 0;
-}
 function roundMs(value) {
     return Math.round(value * 100) / 100;
 }
@@ -34,17 +27,19 @@ function pruneExpiredSamples(cutoffAt) {
         }
     }
 }
-export function recordModelLoadSample(model, loadMs) {
+export function recordModelRequestSample(model, params) {
     if (!model) {
         return;
     }
-    if (!Number.isFinite(loadMs) || loadMs <= 0) {
+    if (!Number.isFinite(params.responseMs) || params.responseMs < 0) {
         return;
     }
     const now = Date.now();
     const sample = {
         at: now,
-        loadMs,
+        ok: params.ok,
+        responseMs: params.responseMs,
+        statusCode: params.statusCode ?? null,
     };
     const existing = modelSamples.get(model) ?? [];
     existing.push(sample);
@@ -55,31 +50,37 @@ export function recordModelLoadSample(model, loadMs) {
     const cutoffAt = now - DEFAULT_WINDOW_MS;
     pruneExpiredSamples(cutoffAt);
 }
+export function recordModelLoadSample(model, loadMs) {
+    recordModelRequestSample(model, {
+        ok: true,
+        responseMs: loadMs,
+        statusCode: 200,
+    });
+}
 function summarizeModel(model, samples) {
     if (samples.length === 0) {
         return null;
     }
-    const loadValues = samples.map((sample) => sample.loadMs).sort((a, b) => a - b);
-    const total = loadValues.reduce((acc, value) => acc + value, 0);
-    const avgLoadMs = total / loadValues.length;
-    const minLoadMs = loadValues[0] ?? 0;
-    const maxLoadMs = loadValues[loadValues.length - 1] ?? 0;
-    const latestAt = samples[samples.length - 1]?.at ?? Date.now();
+    const accessCount = samples.length;
+    const successCount = samples.reduce((count, sample) => count + (sample.ok ? 1 : 0), 0);
+    const totalResponseMs = samples.reduce((total, sample) => total + sample.responseMs, 0);
+    const lastSample = samples[samples.length - 1] ?? null;
+    const avgResponseMs = totalResponseMs / accessCount;
+    const successRatePct = accessCount > 0 ? (successCount / accessCount) * 100 : 0;
     return {
         model,
-        sampleCount: samples.length,
-        avgLoadMs: roundMs(avgLoadMs),
-        p50LoadMs: roundMs(quantileFromSorted(loadValues, 0.5)),
-        p95LoadMs: roundMs(quantileFromSorted(loadValues, 0.95)),
-        minLoadMs: roundMs(minLoadMs),
-        maxLoadMs: roundMs(maxLoadMs),
-        lastSeenAt: new Date(latestAt).toISOString(),
+        accessCount,
+        avgResponseMs: roundMs(avgResponseMs),
+        lastResponseMs: roundMs(lastSample?.responseMs ?? 0),
+        lastSeenAt: new Date(lastSample?.at ?? Date.now()).toISOString(),
+        lastStatusCode: lastSample?.statusCode ?? null,
+        successCount,
+        successRatePct: roundMs(successRatePct),
     };
 }
-export function getModelLoadRankingHealth(windowMs = DEFAULT_WINDOW_MS) {
+export function getModelHealthWindow(windowMs = DEFAULT_WINDOW_MS) {
     const normalizedWindowMs = Number.isFinite(windowMs) && windowMs > 0 ? windowMs : DEFAULT_WINDOW_MS;
-    const now = Date.now();
-    const cutoffAt = now - normalizedWindowMs;
+    const cutoffAt = Date.now() - normalizedWindowMs;
     pruneExpiredSamples(cutoffAt);
     const summaries = [];
     for (const [model, samples] of modelSamples.entries()) {
@@ -96,19 +97,29 @@ export function getModelLoadRankingHealth(windowMs = DEFAULT_WINDOW_MS) {
         }
     }
     summaries.sort((a, b) => {
-        if (a.avgLoadMs !== b.avgLoadMs) {
-            return a.avgLoadMs - b.avgLoadMs;
+        if (a.accessCount !== b.accessCount) {
+            return b.accessCount - a.accessCount;
         }
-        if (a.p95LoadMs !== b.p95LoadMs) {
-            return a.p95LoadMs - b.p95LoadMs;
+        if (a.successRatePct !== b.successRatePct) {
+            return b.successRatePct - a.successRatePct;
         }
-        return b.sampleCount - a.sampleCount;
+        if (a.avgResponseMs !== b.avgResponseMs) {
+            return a.avgResponseMs - b.avgResponseMs;
+        }
+        return a.model.localeCompare(b.model);
     });
     return {
         windowHours: roundMs(normalizedWindowMs / (60 * 60 * 1000)),
-        rankedModels: summaries.map((entry, index) => ({
+        models: summaries.map((entry, index) => ({
             rank: index + 1,
             ...entry,
         })),
+    };
+}
+export function getModelLoadRankingHealth(windowMs = DEFAULT_WINDOW_MS) {
+    const health = getModelHealthWindow(windowMs);
+    return {
+        windowHours: health.windowHours,
+        rankedModels: health.models,
     };
 }
