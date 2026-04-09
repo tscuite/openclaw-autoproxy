@@ -59,6 +59,7 @@ routes:
 - 启动：`openclaw-autoproxy start`
 - 开发（热重载）：`openclaw-autoproxy dev`
 - 帮助：`openclaw-autoproxy help`
+- 发布：`npm publish --registry=https://registry.npmjs.org --access public`
 
 快速示例（安装并立即启动）：
 

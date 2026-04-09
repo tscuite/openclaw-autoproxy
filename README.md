@@ -61,6 +61,7 @@ routes:
 - Start: `openclaw-autoproxy start`
 - Dev (watch): `openclaw-autoproxy dev`
 - Help: `openclaw-autoproxy help`
+- Publish: `npm publish --registry=https://registry.npmjs.org --access public`
 
 Quick run (installed):
 
