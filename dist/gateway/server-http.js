@@ -43,6 +43,12 @@ function formatTableNumber(value) {
     }
     return value.toFixed(2).replace(/\.00$/, "").replace(/(\.\d)0$/, "$1");
 }
+function formatTableDurationMs(value) {
+    if (!Number.isFinite(value)) {
+        return "-";
+    }
+    return String(Math.round(value));
+}
 function padTableCell(value, width, align) {
     return align === "right" ? value.padStart(width, " ") : value.padEnd(width, " ");
 }
@@ -54,8 +60,8 @@ function buildModelHealthTable(windowHours, models) {
             align: "right",
             value: (row) => row.lastStatusCode === null ? "-" : String(row.lastStatusCode),
         },
-        { header: "Avg(ms)", align: "right", value: (row) => formatTableNumber(row.avgResponseMs) },
-        { header: "Last(ms)", align: "right", value: (row) => formatTableNumber(row.lastResponseMs) },
+        { header: "Avg(ms)", align: "right", value: (row) => formatTableDurationMs(row.avgResponseMs) },
+        { header: "Last(ms)", align: "right", value: (row) => formatTableDurationMs(row.lastResponseMs) },
         { header: "Count", align: "right", value: (row) => String(row.accessCount) },
         { header: "OK%", align: "right", value: (row) => `${formatTableNumber(row.successRatePct)}%` },
     ];

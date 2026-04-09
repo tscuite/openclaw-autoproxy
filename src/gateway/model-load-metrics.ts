@@ -155,16 +155,23 @@ export function getModelHealthWindow(windowMs = DEFAULT_WINDOW_MS): {
   }
 
   summaries.sort((a, b) => {
+    const aIsHealthy = a.lastStatusCode === 200 ? 1 : 0;
+    const bIsHealthy = b.lastStatusCode === 200 ? 1 : 0;
+
+    if (aIsHealthy !== bIsHealthy) {
+      return bIsHealthy - aIsHealthy;
+    }
+
+    if (a.avgResponseMs !== b.avgResponseMs) {
+      return a.avgResponseMs - b.avgResponseMs;
+    }
+
     if (a.accessCount !== b.accessCount) {
       return b.accessCount - a.accessCount;
     }
 
     if (a.successRatePct !== b.successRatePct) {
       return b.successRatePct - a.successRatePct;
-    }
-
-    if (a.avgResponseMs !== b.avgResponseMs) {
-      return a.avgResponseMs - b.avgResponseMs;
     }
 
     return a.model.localeCompare(b.model);

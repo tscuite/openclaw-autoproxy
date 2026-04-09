@@ -57,6 +57,14 @@ function formatTableNumber(value: number): string {
   return value.toFixed(2).replace(/\.00$/, "").replace(/(\.\d)0$/, "$1");
 }
 
+function formatTableDurationMs(value: number): string {
+  if (!Number.isFinite(value)) {
+    return "-";
+  }
+
+  return String(Math.round(value));
+}
+
 function padTableCell(value: string, width: number, align: "left" | "right"): string {
   return align === "right" ? value.padStart(width, " ") : value.padEnd(width, " ");
 }
@@ -70,8 +78,8 @@ function buildModelHealthTable(windowHours: number, models: Array<ModelHealthSum
       value: (row: ModelHealthSummary & { rank: number }) =>
         row.lastStatusCode === null ? "-" : String(row.lastStatusCode),
     },
-    { header: "Avg(ms)", align: "right" as const, value: (row: ModelHealthSummary & { rank: number }) => formatTableNumber(row.avgResponseMs) },
-    { header: "Last(ms)", align: "right" as const, value: (row: ModelHealthSummary & { rank: number }) => formatTableNumber(row.lastResponseMs) },
+    { header: "Avg(ms)", align: "right" as const, value: (row: ModelHealthSummary & { rank: number }) => formatTableDurationMs(row.avgResponseMs) },
+    { header: "Last(ms)", align: "right" as const, value: (row: ModelHealthSummary & { rank: number }) => formatTableDurationMs(row.lastResponseMs) },
     { header: "Count", align: "right" as const, value: (row: ModelHealthSummary & { rank: number }) => String(row.accessCount) },
     { header: "OK%", align: "right" as const, value: (row: ModelHealthSummary & { rank: number }) => `${formatTableNumber(row.successRatePct)}%` },
   ];
